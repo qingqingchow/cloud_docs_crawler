@@ -6,9 +6,18 @@ import re
 from urllib.parse import urljoin
 import argparse
 from urllib.parse import urlparse
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.service import Service
+import time
+import pypandoc
 
 # 输出目录
-OUTPUT_DIR = 'output'
+OUTPUT_DIR = 'output1'
 
 # 待处理 URL 列表
 PENDING_URL_LIST = []
@@ -46,52 +55,70 @@ def get_menu_links(url):
                 # 将相对URL转换为绝对URL
                 absolute_url = urljoin(url, href)
                 links.append(absolute_url)
-                print(f"找到菜单项: {text} -> {absolute_url}")
+                # print(f"找到菜单项: {text} -> {absolute_url}")
         return links
     except Exception as e:
         print(f"获取菜单链接时出错: {str(e)}")
         return []
 
 def save_page_as_pdf(url):
-    """将页面保存为PDF"""
+    """将页面保存为PDF（使用Selenium获取完整渲染内容）"""
+    print("saving")
+
     try:
-        response = requests.get(url)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # 配置浏览器
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--window-size=1920,1080")
+        
+        # 初始化WebDriver（兼容selenium 4.0+）
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        # 设置超时
+        driver.set_page_load_timeout(20)
+        print(f"[DEBUG] 正在加载URL: {url}")
+        
+        # 加载页面
+        driver.get(url)
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.TAG_NAME, 'body'))
+        )
+        print("[DEBUG] 页面加载完成")
+        
+        # 获取更新时间（改进的选择器）
+        try:
+            update_element = driver.find_element(
+                By.XPATH, "//*[contains(., '更新时间') or contains(., 'Update')]"
+            )
+            update_time = update_element.text.strip()
+            print(f"[DEBUG] 更新时间: {update_time}")
+        except:
+            update_time = "无更新时间"
+
+        # 等待页面完全加载（可根据需要调整等待时间）
+        time.sleep(3)  # 基础等待
+        # 额外等待特定元素加载（如更新时间）
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "Header--updateTime--YXGPhcZ"))
+            )
+        except:
+            print("更新时间元素未找到，继续处理...")
+        
+        # 获取渲染后的页面内容
+        html_content = driver.page_source
+        soup = BeautifulSoup(html_content, 'html.parser')
         
         # 获取页面标题
-        title = soup.find('title').text.strip()
-
-        # URL Example: https://help.aliyun.com/zh/cs/product-overview/product-billing-rules
-        # 获取 URL 结构，不包含域名，取最后一个 / 后面的内容
-        url_path = urlparse(url).path.split('/')[:-1]
-        dir_sub_path = '/'.join([f for f in url_path if len(f.strip()) > 0])
-
-        # 清理文件名中的非法字符
-        filename = os.path.join(OUTPUT_DIR, "pdf", dir_sub_path, re.sub(r'[\\/*?:"<>|]', '_', title) + '.pdf')
-        print(f"保存 PDF 文件: {OUTPUT_DIR}, {dir_sub_path}, {filename}")
-        # 创建 Pdf 输出目录
-        if not os.path.exists(os.path.join(OUTPUT_DIR, "pdf", dir_sub_path)):
-            os.makedirs(os.path.join(OUTPUT_DIR, "pdf", dir_sub_path))
-
-        # 创建 Html 输出目录
-        html_filename = os.path.join(OUTPUT_DIR, "html", dir_sub_path, re.sub(r'[\\/*?:"<>|]', '_', title) + '.html')
-        if not os.path.exists(os.path.join(OUTPUT_DIR, "html", dir_sub_path)):
-            os.makedirs(os.path.join(OUTPUT_DIR, "html", dir_sub_path))
-
-        with open(html_filename, 'w', encoding='utf-8') as f:
-            f.write(response.text)
-        print(f"已保存: {html_filename}")
-
-        print(f"页面标题: {title}")
-        print(f"页面HTML: {response.text}")
-
-        # 从侧边栏菜单，找到子页面 URL
+        title = soup.find('title').text.strip() if soup.find('title') else "无标题"
+        
+        # 查找子页面URL（与原函数相同）
         main_content = soup.find('div', {'id': 'pc-markdown-container'})
         if main_content:
-            directory_div = main_content.find('div', {'class': 'directory'})
-            sub_urls = directory_div.find_all('ul') if directory_div else []
-            sub_urls = [a for ul in sub_urls for a in ul.find_all('a')]
+             directory_div = main_content.find('div', {'class': 'directory'})
+             sub_urls = directory_div.find_all('ul') if directory_div else []
+             sub_urls = [a for ul in sub_urls for a in ul.find_all('a')]
         else:
             sub_urls = []
         for sub_url in sub_urls:
@@ -100,28 +127,123 @@ def save_page_as_pdf(url):
                 sub_url = urljoin(url, href)
                 PENDING_URL_LIST.append(sub_url)
         
-        # 找到主要内容区域
+        # 查找主要内容区域
         main_content = soup.find('div', {'id': 'pc-markdown-container'})
         if not main_content:
             print(f"未找到主要内容区域: {url}")
+            driver.quit()
             return
         
+        # 查找更新时间（使用更健壮的方法）
+        update_time = "无更新时间"
+        update_elements = driver.find_elements(By.CLASS_NAME, "Header--updateTime--YXGPhcZ")
+        if update_elements:
+            update_time = update_elements[0].text.strip()
+        else:
+            # 尝试其他可能的选择器
+            try:
+                update_elements = driver.find_elements(By.XPATH, "//*[contains(text(), '更新时间：')]")
+                if update_elements:
+                    update_time = update_elements[0].text.strip()
+            except:
+                pass
+        
+        final_title = "("+update_time+")"+title
+        print(f"final_title:{final_title}")
+        # print(f"update_time:{update_time}")
+
+        # URL处理（与原函数相同）
+        url_path = urlparse(url).path.split('/')[:-1]
+        dir_sub_path = '/'.join([f for f in url_path if len(f.strip()) > 0])
+
+        # 清理文件名中的非法字符
+        filename = os.path.join(OUTPUT_DIR, "pdf", dir_sub_path, re.sub(r'[\\/*?"<>|]', '_', final_title) + '.pdf')
+        print(f"保存 PDF 文件: {OUTPUT_DIR}, {dir_sub_path}, {filename}")
+        
+        # 创建输出目录
+        if not os.path.exists(os.path.join(OUTPUT_DIR, "pdf", dir_sub_path)):
+            os.makedirs(os.path.join(OUTPUT_DIR, "pdf", dir_sub_path))
+
+        # 保存HTML副本（可选）
+        html_filename = os.path.join(OUTPUT_DIR, "html", dir_sub_path, re.sub(r'[\\/*?"<>|]', '_', final_title) + '.html')
+        if not os.path.exists(os.path.join(OUTPUT_DIR, "html", dir_sub_path)):
+            os.makedirs(os.path.join(OUTPUT_DIR, "html", dir_sub_path))
+
+        with open(html_filename, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        print(f"已保存HTML: {html_filename}")
+
+        print(f"页面标题: {title}")
+
+        # 生成Markdown文件
+        md_filename = os.path.join(OUTPUT_DIR, "md", dir_sub_path, re.sub(r'[\\/*?"<>|]', '_', final_title) + '.md')
+        if not os.path.exists(os.path.join(OUTPUT_DIR, "md", dir_sub_path)):
+            os.makedirs(os.path.join(OUTPUT_DIR, "md", dir_sub_path))
+
+        md_filename = os.path.join(OUTPUT_DIR, "md", dir_sub_path, re.sub(r'[\\/*?"<>|]', '_', final_title) + '.md')
+        if not os.path.exists(os.path.join(OUTPUT_DIR, "md", dir_sub_path)):
+            os.makedirs(os.path.join(OUTPUT_DIR, "md", dir_sub_path))
+
+        try:
+            # 将HTML内容转换为Markdown（保留表格、列表等格式）
+            md_content = pypandoc.convert_text(
+                str(main_content),  # 传入HTML内容
+                'md',               # 输出格式为Markdown
+                format='html',      # 输入格式为HTML
+                extra_args=['--wrap=none']  # 禁止自动换行（避免表格被破坏）
+            )
+            
+            # 添加标题和更新时间
+            full_md_content = f"# {title}\n\n**更新时间**: {update_time}\n\n{md_content}"
+            
+            with open(md_filename, 'w', encoding='utf-8') as f:
+                f.write(full_md_content)
+            print(f"已保存MD文件（优化表格）: {md_filename}")
+
+        except Exception as e:
+            # 如果pandoc失败，回退到纯文本
+            print(f"pandoc转换失败，使用纯文本回退: {str(e)}")
+            with open(md_filename, 'w', encoding='utf-8') as f:
+                f.write(f"# {title}\n\n**更新时间**: {update_time}\n\n{main_content.get_text()}")
+        # ============= /生成Markdown文件 =============
+
+
         # 创建临时HTML文件
         temp_html = os.path.join(OUTPUT_DIR, "temp.html")
-        # 创建完整的HTML结构
-        temp_content = f"""<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"/><title>{title}</title></head><body>{str(main_content)}</body></html>"""
+        temp_content = f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8"/>
+    <title>{title}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; }}
+        .update-time {{ color: #666; margin-bottom: 20px; }}
+    </style>
+</head>
+<body>
+    <h1>{title}</h1>
+    <div class="update-time">{update_time}</div>
+    {str(main_content)}
+</body>
+</html>"""
+        
         with open(temp_html, 'w', encoding='utf-8') as f:
             f.write(temp_content)
         
         # 转换为PDF
         pdfkit.from_file(temp_html, filename)
         
-        # 删除临时文件
+        # 清理
         os.remove(temp_html)
+        driver.quit()
         
-        print(f"已保存: {filename}")
+        print(f"已保存PDF: {filename}")
+        print(f"更新时间: {update_time}")
     except Exception as e:
         print(f"处理页面时出错 {url}: {str(e)}")
+        if 'driver' in locals():
+            driver.quit()
+
 
 def main():
     parser = argparse.ArgumentParser(description='阿里云产品页面爬虫')
@@ -142,6 +264,10 @@ def main():
         print(f"正在处理页面: {link}")
         save_page_as_pdf(link)
         PROCESSED_URL_LIST.append(link)
+
+    # print(f"正在处理页面: {args.url}")
+    # save_page_as_pdf(args.url)
+    # # PROCESSED_URL_LIST.append(link)
 
 if __name__ == '__main__':
     main() 
